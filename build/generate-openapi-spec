@@ -9,9 +9,11 @@ OUTPUT_DIR="${PROJECT_ROOT}/openapi"
 BPG_CONTAINER="bpg"
 BPG_IMAGE="bpg:openapi-spec"
 BPG_API_PORT=8080
-BPG_API_BASE_URL="http://localhost:${BPG_API_PORT}"
+BPG_API_BASE_URL="http://localhost:${BPG_API_PORT}/skatev2"
 HEALTH_CHECK_URL="${BPG_API_BASE_URL}/healthcheck/status"
-OPENAPI_DOC_URL="${BPG_API_BASE_URL}/api-docs"
+OPENAPI_URL="${BPG_API_BASE_URL}/openapi.<format>"
+API_USER=user_name
+API_PASSWORD=dummy_password
 HOST_APP_CONFIG="${PROJECT_ROOT}/helm/batch-processing-gateway/resources/config.example.yaml"
 CONTAINER_APP_CONFIG="/etc/app_config/app-config.yaml"
 
@@ -68,39 +70,62 @@ start_bpg_container() {
 
     # Check the API health regardless of whether we started a new container or reused an existing one
     echo "Checking API health..."
-    while ! curl -s -f -H "Accept: application/json" ${HEALTH_CHECK_URL}; do
+    while ! curl -u ${API_USER}:${API_PASSWORD} -s -f -H "Accept: application/json" ${HEALTH_CHECK_URL}; do
         echo "Waiting for ${BPG_CONTAINER} API to be healthy..."
         sleep 1
     done
-    echo "${BPG_CONTAINER} API is healthy."
+    echo "\n${BPG_CONTAINER} API is healthy."
 }
 
 
 teardown_bpg_container() {
     echo "Stopping and removing BPG container..."
-    docker stop bpg
-    docker rm bpg
+    docker stop ${BPG_CONTAINER}
+    docker rm ${BPG_CONTAINER}
     echo "BPG container stopped and removed."
 }
 
-generate_openapi_spec() {
-    # generate the OpenAPI spec in yaml format
-    docker run --rm \
-        -v "$(pwd):/local" \
-        -w /local \
-        ${OPEN_API_GENERATOR_CLI_IMAGE} \
-        generate \
-        -i ${OPENAPI_DOC_URL} \
-        -g openapi-yaml \
-        -o /local \
-
-    docker cp bpg:/local/openapi.yaml ${OUTPUT_DIR}/openapi.yaml
-    # check if the openapi.yaml file is generated
-    if [ ! -f "${OUTPUT_DIR}/openapi.yaml" ]; then
-        echo "Failed to generate OpenAPI spec."
+dump_openapi_spec() {
+    # Dump the OpenAPI spec with curl
+    # $1 - format: json or yaml (default: json)
+    local format=${1:-"json"}
+    
+    # Validate format parameter
+    if [ "$format" != "json" ] && [ "$format" != "yaml" ]; then
+        echo "Invalid format '$format'. Supported formats are 'json' or 'yaml'."
         exit 1
     fi
-    echo "OpenAPI spec generated successfully at ${OUTPUT_DIR}/openapi.yaml"
+    
+    echo "Dumping OpenAPI spec in ${format} format..."
+    mkdir -p ${OUTPUT_DIR}
+
+    # Format the URL for the request
+    local openapi_url=${OPENAPI_URL//<format>/$format}
+    
+    # Generate the spec in the requested format
+    echo "Generating ${format} format..."
+    curl -u ${API_USER}:${API_PASSWORD} -s -f -H "Accept: application/json" ${openapi_url} > ${output_file}
+    if [ $? -ne 0 ]; then
+        echo "Failed to dump OpenAPI spec in ${format} format."
+        exit 1
+    fi
+    
+    echo "OpenAPI spec dumped successfully in ${format} format."
+}
+
+generate_openapi_python_client() {
+    # generate the OpenAPI spec in yaml format
+    docker run --rm \
+        -v "${OUTPUT_DIR}:/local" \
+        ${OPEN_API_GENERATOR_CLI_IMAGE} \
+        generate \
+        -i /local/openapi.json \
+        -g python \
+        -o /local/python-client \
+        --package-name bpg_api_client \
+        --additional-properties=packageUrl=${BPG_API_BASE_URL} \
+        --additional-properties=packageName=bpg_api_client \
+        --additional-properties=packageDescription="Python client for Batch Processing Gateway Rest API" 
 }
 
 main() {
@@ -108,7 +133,10 @@ main() {
   check_openapi_generator_cli
   check_bpg_image
   start_bpg_container
-  generate_openapi_spec
+  dump_openapi_spec "json"
+  dump_openapi_spec "yaml"
+  generate_openapi_python_client
   teardown_bpg_container
 }
+
 main
